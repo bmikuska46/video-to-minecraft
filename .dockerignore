@@ -1,0 +1,10 @@
+.git
+artifacts
+fixtures/captures/*/video.mp4
+**/__pycache__
+*.pyc
+**/target
+**/.pytest_cache
+.venv*
+apps/mobile
+infra/paper

@@ -1,0 +1,7 @@
+name: MinecraftVideoWorldgen
+version: '${project.version}'
+main: dev.minecraftvideo.worldgen.WorldgenPlugin
+description: Generates and validates a Minecraft world from a supported voxel artifact.
+api-version: '26.2'
+load: STARTUP
+authors: [video-to-minecraft]

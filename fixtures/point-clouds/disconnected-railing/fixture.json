@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "fixtureType": "synthetic-open-surface-point-cloud",
+  "coordinateSystem": "+Y up, right-handed",
+  "units": "metres",
+  "sampleSpacing": 0.1,
+  "pointCount": 400,
+  "bounds": {
+    "min": [
+      -1.55,
+      0.45,
+      0.0
+    ],
+    "max": [
+      1.55,
+      3.05,
+      0.0
+    ]
+  },
+  "properties": [
+    "position",
+    "normal",
+    "sRGB color",
+    "confidence",
+    "support_count",
+    "source_view_id"
+  ],
+  "assertions": {
+    "description": "Strongly supported thin railing details disconnected from all other geometry.",
+    "expectedDetachedComponents": 1,
+    "emptyRegions": [
+      {
+        "name": "space-behind-railing",
+        "min": [
+          -1.4,
+          0.65,
+          -0.8
+        ],
+        "max": [
+          1.4,
+          2.85,
+          -0.2
+        ]
+      }
+    ]
+  },
+  "plySha256": "5da1dfdd93516d0673ad52a1342ff04c66e1536ed9aa93949688bcb5c40fd0ed"
+}

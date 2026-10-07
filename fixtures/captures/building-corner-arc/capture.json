@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "monotonicRecordingStartNs": 0,
+  "wallClockTimestamp": "2026-08-18T00:00:00Z",
+  "orientation": "landscape-left",
+  "cameraFormat": "synthetic-pinhole-1280x720",
+  "width": 1280,
+  "height": 720,
+  "fps": 30,
+  "codec": "h264",
+  "physicalLens": "synthetic-pinhole",
+  "appVersion": "fixture-generator-v1",
+  "nativeScannerModuleVersion": "fixture-generator-v1"
+}

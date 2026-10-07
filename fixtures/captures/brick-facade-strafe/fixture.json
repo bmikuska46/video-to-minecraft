@@ -1,0 +1,14 @@
+{
+  "fixtureType": "synthetic",
+  "scene": "brick_facade_with_open_windows",
+  "durationMs": 15000,
+  "coordinateSystem": "+Y up, right-handed, metres",
+  "cameraPath": {
+    "kind": "linear",
+    "start": [-1.6, 1.65, 5.5],
+    "end": [1.6, 1.65, 5.5],
+    "lookAt": [0.0, 1.7, 0.0],
+    "description": "Walk 3.2 m left-to-right, about 5.5 m from the wall, with the facade centered."
+  },
+  "videoSha256": "6c633044c74c1a294f3bb80c61703120393a9d09f8b67d291bf0cd17f6de34d8"
+}

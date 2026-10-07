@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://video-to-minecraft.local/contracts/capture-v1.schema.json",
+  "title": "Video-to-Minecraft capture metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "monotonicRecordingStartNs",
+    "wallClockTimestamp",
+    "orientation",
+    "cameraFormat",
+    "width",
+    "height",
+    "fps",
+    "codec",
+    "appVersion",
+    "nativeScannerModuleVersion"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "monotonicRecordingStartNs": { "type": "integer", "minimum": 0 },
+    "wallClockTimestamp": { "type": "string", "format": "date-time" },
+    "orientation": {
+      "enum": ["portrait", "portrait-upside-down", "landscape-left", "landscape-right"]
+    },
+    "cameraFormat": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+    "height": { "type": "integer", "minimum": 1, "maximum": 16384 },
+    "fps": { "type": "number", "exclusiveMinimum": 0, "maximum": 240 },
+    "codec": { "const": "h264" },
+    "physicalLens": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+    "appVersion": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "nativeScannerModuleVersion": { "type": "string", "minLength": 1, "maxLength": 80 }
+  }
+}

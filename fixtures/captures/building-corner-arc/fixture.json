@@ -1,0 +1,14 @@
+{
+  "fixtureType": "synthetic",
+  "scene": "textured_building_corner",
+  "durationMs": 15000,
+  "coordinateSystem": "+Y up, right-handed, metres",
+  "cameraPath": {
+    "kind": "arc",
+    "start": [-3.4, 1.7, 4.0],
+    "end": [4.0, 1.7, 3.4],
+    "lookAt": [0.0, 1.7, 0.0],
+    "description": "Walk a roughly 70-degree, 4.4 m arc around the corner while aiming at the corner."
+  },
+  "videoSha256": "fbdb9a7cc201a2bbef3fdc110ccacb261a26f3e2815ba4188a342b21cfb1cc91"
+}

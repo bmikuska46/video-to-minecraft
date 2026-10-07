@@ -1,0 +1,14 @@
+{
+  "fixtureType": "synthetic",
+  "scene": "low_texture_painted_facade",
+  "durationMs": 15000,
+  "coordinateSystem": "+Y up, right-handed, metres",
+  "cameraPath": {
+    "kind": "linear",
+    "start": [-1.0, 1.6, 6.5],
+    "end": [1.0, 1.6, 6.5],
+    "lookAt": [0.0, 1.7, 0.0],
+    "description": "Walk 2.0 m left-to-right, about 6.5 m from the wall; intentionally low texture."
+  },
+  "videoSha256": "b7d159743427a5ee4d6fe9828279d09037cd1c611205720b7af8271c8e1c3f9d"
+}

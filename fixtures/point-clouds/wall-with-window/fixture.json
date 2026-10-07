@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "fixtureType": "synthetic-open-surface-point-cloud",
+  "coordinateSystem": "+Y up, right-handed",
+  "units": "metres",
+  "sampleSpacing": 0.1,
+  "pointCount": 2212,
+  "bounds": {
+    "min": [
+      -3.0,
+      0.0,
+      0.0
+    ],
+    "max": [
+      3.0,
+      4.0,
+      0.0
+    ]
+  },
+  "properties": [
+    "position",
+    "normal",
+    "sRGB color",
+    "confidence",
+    "support_count",
+    "source_view_id"
+  ],
+  "assertions": {
+    "description": "One observed facade with an open window; no back or side surfaces.",
+    "emptyRegions": [
+      {
+        "name": "window-opening",
+        "min": [
+          -0.7,
+          1.1,
+          -0.02
+        ],
+        "max": [
+          0.7,
+          2.7,
+          0.02
+        ]
+      },
+      {
+        "name": "unobserved-back",
+        "min": [
+          -2.8,
+          0.2,
+          -1.0
+        ],
+        "max": [
+          2.8,
+          3.8,
+          -0.2
+        ]
+      }
+    ]
+  },
+  "plySha256": "5107d417dd358db714249860f8b5a65036ae1021012a79fd01b955bca0a243c2"
+}

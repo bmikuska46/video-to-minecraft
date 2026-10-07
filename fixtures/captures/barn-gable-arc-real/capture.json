@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "monotonicRecordingStartNs": 0,
+  "wallClockTimestamp": "2017-01-01T00:00:00Z",
+  "orientation": "landscape-left",
+  "cameraFormat": "tanks-and-temples-3840x2160-downscaled-1920x1080",
+  "width": 1920,
+  "height": 1080,
+  "fps": 29.97,
+  "codec": "h264",
+  "physicalLens": null,
+  "appVersion": "fetch-real-capture-v1",
+  "nativeScannerModuleVersion": "none"
+}

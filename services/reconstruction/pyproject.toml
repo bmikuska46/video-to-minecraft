@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "minecraft-video-reconstruction"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy>=2.0,<3",
+  "protobuf>=6.31,<8",
+  # Must come from pip: the distro python3-scipy is built against NumPy 1.x.
+  "scipy>=1.14,<2",
+  "pillow>=12,<13",
+  # Monocular depth completion (depth_completion.py); versions as validated.
+  "torch>=2.14,<2.15",
+  "torchvision>=0.29,<0.30",
+  "transformers>=5.17,<6",
+  "zstandard>=0.23,<1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.3,<9"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["generated"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

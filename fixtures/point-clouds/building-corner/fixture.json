@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "fixtureType": "synthetic-open-surface-point-cloud",
+  "coordinateSystem": "+Y up, right-handed",
+  "units": "metres",
+  "sampleSpacing": 0.1,
+  "pointCount": 2542,
+  "bounds": {
+    "min": [
+      -3.0,
+      0.0,
+      -3.0
+    ],
+    "max": [
+      0.0,
+      4.0,
+      0.0
+    ]
+  },
+  "properties": [
+    "position",
+    "normal",
+    "sRGB color",
+    "confidence",
+    "support_count",
+    "source_view_id"
+  ],
+  "assertions": {
+    "description": "Two perpendicular observed walls meeting at a vertical corner.",
+    "emptyRegions": [
+      {
+        "name": "unobserved-interior",
+        "min": [
+          -2.8,
+          0.2,
+          -2.8
+        ],
+        "max": [
+          -0.2,
+          3.8,
+          -0.2
+        ]
+      }
+    ]
+  },
+  "plySha256": "65f30fe8409ed6d99039c89534c2a78c6df7dc8e50435ba77b042ce4cfdf42af"
+}

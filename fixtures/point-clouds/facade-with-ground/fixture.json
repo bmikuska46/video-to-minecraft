@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "fixtureType": "synthetic-open-surface-point-cloud",
+  "coordinateSystem": "+Y up, right-handed",
+  "units": "metres",
+  "sampleSpacing": 0.1,
+  "pointCount": 6703,
+  "bounds": {
+    "min": [
+      -4.0,
+      0.0,
+      -2.0
+    ],
+    "max": [
+      4.0,
+      3.5,
+      4.0
+    ]
+  },
+  "properties": [
+    "position",
+    "normal",
+    "sRGB color",
+    "confidence",
+    "support_count",
+    "source_view_id"
+  ],
+  "assertions": {
+    "description": "A facade plus observed ground and adjacent structure that the crop must remove.",
+    "recommendedCrop": {
+      "min": [
+        -2.05,
+        -0.05,
+        -0.05
+      ],
+      "max": [
+        2.05,
+        3.55,
+        0.05
+      ]
+    },
+    "emptyRegions": [
+      {
+        "name": "unobserved-behind-facade",
+        "min": [
+          -1.8,
+          0.2,
+          -1.0
+        ],
+        "max": [
+          1.8,
+          3.3,
+          -0.2
+        ]
+      }
+    ]
+  },
+  "plySha256": "31dd956fee3a7b16fd6e996513498e5d3a49eeb12966e01848aeb9b6967ec6ed"
+}

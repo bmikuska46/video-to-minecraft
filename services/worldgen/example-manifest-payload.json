@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "minecraftVersion": "26.2",
+  "voxelSha256": "REPLACE_WITH_LOWERCASE_SHA256",
+  "worldName": "minecraft-video-world",
+  "platformY": 64,
+  "platformMargin": 8,
+  "platformBlockState": "minecraft:smooth_stone",
+  "batchSize": 20000,
+  "maxBlockCount": 1000000,
+  "maxPlatformBlocks": 4000000
+}

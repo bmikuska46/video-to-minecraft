@@ -1,0 +1,23 @@
+{
+  "fixtureType": "real",
+  "scene": "park_building_gable_end",
+  "durationMs": 15000,
+  "cameraPath": {
+    "kind": "handheld-arc",
+    "description": "Handheld walk around the corner of a single-storey building, ending front-on to its gable end (door, lattice panel, garage doors)."
+  },
+  "source": {
+    "dataset": "Tanks and Temples",
+    "file": "Barn.mp4",
+    "url": "https://drive.usercontent.google.com/download?id=0B-ePgl6HF260ZlBZcHFrTHFLdGM&export=download&confirm=t",
+    "bytes": 4747838231,
+    "segmentStartSeconds": 110.0,
+    "segmentDurationSeconds": 15.0,
+    "segmentSha256": "71baf89f9d00ed1833f4ee4d8538e21b4870cf7333673974f28700cfb9f2117a",
+    "license": "CC BY 4.0",
+    "licenseUrl": "https://www.tanksandtemples.org/license/",
+    "attribution": "Knapitsch, Park, Zhou and Koltun, 'Tanks and Temples: Benchmarking Large-Scale Scene Reconstruction', ACM Transactions on Graphics 36(4), 2017. https://www.tanksandtemples.org/",
+    "changes": "Trimmed to the stated segment, downscaled from 3840x2160 to 1920x1080, re-encoded as H.264 CRF 18 with metadata removed."
+  },
+  "videoSha256": "6e67fd2a65033fc35f64aad666428568c83d60156ea72e70ba53e13f8aea9a98"
+}
