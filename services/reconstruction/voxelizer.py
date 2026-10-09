@@ -205,21 +205,30 @@ def _candidate_cells(point: np.ndarray, primary: Cell, grid_origin: np.ndarray,
                     yield candidate
 
 
-def voxelize_points(
-    points: np.ndarray,
-    *,
-    transform: Sequence[float] = IDENTITY_4X4,
-    crop_min: Sequence[float],
-    crop_max: Sequence[float],
-    scale_axis: str,
-    blocks: int,
-    palette: Palette,
-    config: VoxelizationConfig = VoxelizationConfig(),
-    camera_origins: Mapping[int, Sequence[float]] | None = None,
-    known_free_cells: Iterable[Cell] = (),
-) -> VoxelizationResult:
-    """Transform, crop, aggregate, support-filter, color, and place surface cells."""
-    _validate_inputs(transform, crop_min, crop_max, scale_axis, blocks, config)
+# "vectorized" groups points by cell with one sort and aggregates every cell with
+# bulk NumPy: 0.6 s instead of 11.5-11.9 s for the reference room at 100 blocks
+# (1.65M points, 53-54k blocks). "loop" is the original per-point / per-cell
+# implementation, kept for comparison; both give byte-identical voxels.pb.zst.
+# Camera rays and splatting always use "loop".
+IMPLEMENTATIONS = ("vectorized", "loop")
+
+
+@dataclass(frozen=True)
+class _Grid:
+    names: frozenset[str]
+    matrix: np.ndarray
+    transformed: np.ndarray
+    lower: np.ndarray
+    upper: np.ndarray
+    selected: np.ndarray
+    voxel_size: float
+    dimensions: np.ndarray
+    primary: np.ndarray
+
+
+def _crop_to_grid(points: np.ndarray, transform: Sequence[float], crop_min: Sequence[float],
+                  crop_max: Sequence[float], scale_axis: str, blocks: int) -> _Grid:
+    """Transform and crop the points and find each kept point's primary cell."""
     names = set(points.dtype.names or ())
     required = {"x", "y", "z", "red", "green", "blue"}
     if not required <= names:
@@ -244,6 +253,42 @@ def voxelize_points(
     scaled = np.where(np.isclose(scaled, nearest_plane, atol=2e-6, rtol=0), nearest_plane, scaled)
     primary_array = np.floor(scaled).astype(np.int64)
     primary_array = np.minimum(primary_array, dimensions - 1)
+    return _Grid(frozenset(names), matrix, transformed, lower, upper, selected, voxel_size,
+                 dimensions, primary_array)
+
+
+def voxelize_points(
+    points: np.ndarray,
+    *,
+    transform: Sequence[float] = IDENTITY_4X4,
+    crop_min: Sequence[float],
+    crop_max: Sequence[float],
+    scale_axis: str,
+    blocks: int,
+    palette: Palette,
+    config: VoxelizationConfig = VoxelizationConfig(),
+    camera_origins: Mapping[int, Sequence[float]] | None = None,
+    known_free_cells: Iterable[Cell] = (),
+    implementation: str = "vectorized",
+) -> VoxelizationResult:
+    """Transform, crop, aggregate, support-filter, color, and place surface cells."""
+    if implementation not in IMPLEMENTATIONS:
+        raise VoxelizationError(f"unknown voxelizer implementation {implementation!r}")
+    _validate_inputs(transform, crop_min, crop_max, scale_axis, blocks, config)
+    grid = _crop_to_grid(points, transform, crop_min, crop_max, scale_axis, blocks)
+    if implementation == "vectorized" and not camera_origins and config.splat_radius_voxels <= 0:
+        return _voxelize_vectorized(points, grid, palette, config, known_free_cells)
+    return _voxelize_loop(points, grid, palette, config, camera_origins, known_free_cells)
+
+
+def _voxelize_loop(points: np.ndarray, grid: _Grid, palette: Palette, config: VoxelizationConfig,
+                   camera_origins: Mapping[int, Sequence[float]] | None,
+                   known_free_cells: Iterable[Cell]) -> VoxelizationResult:
+    """The original implementation: Python sets per cell and one palette lookup per cell."""
+    names, matrix, transformed, lower, upper = (grid.names, grid.matrix, grid.transformed,
+                                                grid.lower, grid.upper)
+    selected, voxel_size, dimensions, primary_array = (grid.selected, grid.voxel_size,
+                                                       grid.dimensions, grid.primary)
     primary_cells = [tuple(int(value) for value in row) for row in primary_array]
     observed_cells = set(primary_cells)
 
@@ -365,6 +410,183 @@ def voxelize_points(
                               translation, len(points), len(selected), rejected)
 
 
+def _cell_keys(cells: np.ndarray, dimensions: np.ndarray) -> np.ndarray:
+    """One int64 per in-grid cell, ordered like the (x, y, z) tuples."""
+    return (cells[:, 0] * dimensions[1] + cells[:, 1]) * dimensions[2] + cells[:, 2]
+
+
+def _group_medians(values: np.ndarray, group: np.ndarray, picks: np.ndarray) -> np.ndarray:
+    """Per column, the value at sorted position ``picks`` after a stable sort within groups.
+
+    With unit weights ``_weighted_median`` picks the element at rank (k - 1) // 2
+    of the cell's k points (cumulative weights 1..k reach k / 2 there, exactly).
+    """
+    result = np.empty((len(picks), values.shape[1]), dtype=values.dtype)
+    for column in range(values.shape[1]):
+        order = np.lexsort((values[:, column], group))
+        result[:, column] = values[order[picks], column]
+    return result
+
+
+def _closest_palette_indices(colors: np.ndarray, palette: Palette) -> np.ndarray:
+    """Index into palette.entries of closest_palette_entry for every row of uint8 colors.
+
+    Scores are computed in bulk for each distinct color. Colors whose best and
+    second-best scores lie within 1e-9 (where bulk and per-color rounding could
+    disagree, including exact ties) are re-scored with closest_palette_entry.
+    """
+    packed = (colors[:, 0] << 16) | (colors[:, 1] << 8) | colors[:, 2]
+    unique, inverse = np.unique(packed, return_inverse=True)
+    rgb = np.stack([unique >> 16, (unique >> 8) & 255, unique & 255], axis=1)
+    entry_lab = np.array([entry.lab for entry in palette.entries], dtype=np.float64)
+    penalty = np.array([entry.texture_noise_penalty for entry in palette.entries], dtype=np.float64)
+    scores = np.linalg.norm(srgb_to_lab(rgb)[:, None, :] - entry_lab[None], axis=2) + penalty
+    best = np.argmin(scores, axis=1)
+    if len(palette.entries) > 1:
+        lowest_two = np.partition(scores, 1, axis=1)[:, :2]
+        for row in np.flatnonzero(lowest_two[:, 1] - lowest_two[:, 0] < 1e-9):
+            entry = closest_palette_entry(tuple(int(value) for value in rgb[row]), palette)
+            best[row] = palette.entries.index(entry)
+    return best[inverse.reshape(-1)]
+
+
+def _voxelize_vectorized(points: np.ndarray, grid: _Grid, palette: Palette, config: VoxelizationConfig,
+                         known_free_cells: Iterable[Cell]) -> VoxelizationResult:
+    """Same result as _voxelize_loop without camera rays or splatting, using one sort per pass."""
+    names, transformed, lower, upper = grid.names, grid.transformed, grid.lower, grid.upper
+    voxel_size, dimensions = grid.voxel_size, grid.dimensions
+    free = {tuple(map(int, cell)) for cell in known_free_cells}
+    keys = _cell_keys(grid.primary, dimensions)
+    keep = np.ones(len(keys), dtype=bool)
+    if free:
+        free_array = np.array(sorted(free), dtype=np.int64).reshape(-1, 3)
+        in_grid = ((free_array >= 0) & (free_array < dimensions)).all(axis=1)
+        keep = ~np.isin(keys, _cell_keys(free_array[in_grid], dimensions))
+    # A stable sort keeps each cell's points in ascending point order, as the
+    # loop's sorted(member set) does.
+    order = np.argsort(keys[keep], kind="stable")
+    members = grid.selected[keep][order]
+    sorted_keys = keys[keep][order]
+    cells_of_members = grid.primary[keep][order]
+    if not len(members):
+        raise VoxelizationError("no cells pass observation-support thresholds")
+    starts = np.flatnonzero(np.r_[True, sorted_keys[1:] != sorted_keys[:-1]])
+    counts = np.diff(np.r_[starts, len(members)])
+    group = np.repeat(np.arange(len(starts)), counts)
+    cells = cells_of_members[starts]
+
+    confidence_all = (np.asarray(points["confidence"], dtype=float) if "confidence" in names
+                      else np.ones(len(points), dtype=float))
+    view_all = (np.asarray(points["source_view_id"], dtype=np.int64)
+                if "source_view_id" in names else None)
+    support_all = (np.asarray(points["support_count"], dtype=np.int64)
+                   if "support_count" in names else None)
+    colors_all = np.column_stack([points[name] for name in ("red", "green", "blue")]).astype(float)
+    normals_all = None
+    if {"nx", "ny", "nz"} <= names:
+        normals_all = np.column_stack([points[name] for name in ("nx", "ny", "nz")]).astype(float)
+        normals_all = normals_all @ grid.matrix[:3, :3].T
+    angle_all = (np.clip(np.asarray(points["view_angle_weight"], dtype=float), 0, 1)
+                 if "view_angle_weight" in names else np.ones(len(points), dtype=float))
+
+    if support_all is not None:
+        # As in the loop: the maximum, never the sum, of per-point view counts.
+        views = np.maximum.reduceat(support_all[members], starts)
+    elif view_all is not None:
+        member_views = view_all[members]
+        by_view = np.lexsort((member_views, group))
+        view_sorted, group_sorted = member_views[by_view], group[by_view]
+        first = np.r_[True, (group_sorted[1:] != group_sorted[:-1]) | (view_sorted[1:] != view_sorted[:-1])]
+        views = np.bincount(group_sorted[first], minlength=len(starts))
+    else:
+        views = np.zeros(len(starts), dtype=np.int64)
+    clipped = np.clip(confidence_all[members], 0, 1)
+    # Unit weights (no confidence or view-angle property, the case for every
+    # pipeline PLY) make the cell averages and weighted medians exact in bulk.
+    # Other weights reuse the loop's per-cell arithmetic so results stay identical.
+    unit_weights = bool(np.all(clipped == 1.0) and np.all(angle_all[members] == 1.0))
+    ends = np.r_[starts[1:], len(members)]
+    if unit_weights:
+        confidence = np.ones(len(starts), dtype=float)
+    else:
+        confidence = np.array([float(np.average(clipped[start:end])) for start, end in zip(starts, ends)])
+    centers = lower + (cells.astype(float) + 0.5) * voxel_size
+    nearest = np.minimum.reduceat(np.linalg.norm(transformed[members] - centers[group], axis=1), starts)
+    allowed_distance = config.allowed_surface_radius_voxels * voxel_size
+    has_views = view_all is not None or support_all is not None
+    accepted = ~((counts < config.minimum_supporting_points)
+                 | (has_views & (views < config.minimum_distinct_views))
+                 | (confidence < config.minimum_confidence)
+                 | (nearest > allowed_distance))
+    rejected = int((~accepted).sum())
+
+    linear_all = _srgb_to_linear(colors_all[members])
+    if unit_weights:
+        picks = starts + (counts - 1) // 2
+        robust_linear = _group_medians(linear_all, group, picks)
+        normal = (_group_medians(normals_all[members], group, picks) if normals_all is not None
+                  else np.zeros((len(starts), 3), dtype=float))
+    else:
+        robust_linear = np.zeros((len(starts), 3), dtype=float)
+        normal = np.zeros((len(starts), 3), dtype=float)
+        weights_all = np.maximum(clipped * angle_all[members], np.finfo(float).eps)
+        for cell_index in np.flatnonzero(accepted):
+            start, end = starts[cell_index], ends[cell_index]
+            robust_linear[cell_index] = _weighted_median(linear_all[start:end], weights_all[start:end])
+            if normals_all is not None:
+                normal[cell_index] = _weighted_median(normals_all[members[start:end]], weights_all[start:end])
+    robust_srgb = np.where(robust_linear <= 0.0031308, robust_linear * 12.92,
+                           1.055 * robust_linear ** (1 / 2.4) - 0.055)
+    colors = np.clip(np.rint(robust_srgb * 255), 0, 255).astype(np.int64)
+    if normals_all is not None:
+        length = np.linalg.norm(normal, axis=1)
+        normal = np.where((length > 1e-12)[:, None], normal / np.where(length > 1e-12, length, 1.0)[:, None],
+                          normal)
+
+    kept = np.flatnonzero(accepted)
+    if config.isolated_cell_minimum_points and len(kept):
+        kept_keys = _cell_keys(cells[kept], dimensions)
+        has_neighbour = np.zeros(len(kept), dtype=bool)
+        for offset in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+            neighbour = cells[kept] + np.asarray(offset)
+            in_grid = ((neighbour >= 0) & (neighbour < dimensions)).all(axis=1)
+            has_neighbour |= in_grid & np.isin(_cell_keys(neighbour, dimensions), kept_keys)
+        isolated = (counts[kept] < config.isolated_cell_minimum_points) & ~has_neighbour
+        rejected += int(isolated.sum())
+        kept = kept[~isolated]
+    if not len(kept):
+        raise VoxelizationError("no cells pass observation-support thresholds")
+
+    source = cells[kept]
+    minimum = np.min(source, axis=0)
+    maximum = np.max(source, axis=0)
+    translation = (-int(round((minimum[0] + maximum[0]) / 2)),
+                   config.flat_surface_y - int(minimum[1]),
+                   -int(round((minimum[2] + maximum[2]) / 2)))
+    # The loop's placement order: (x // 16, z // 16, y, z, x).
+    placement = kept[np.lexsort((source[:, 0], source[:, 2], source[:, 1], source[:, 2] // 16,
+                                 source[:, 0] // 16))]
+    entries = palette.entries
+    palette_index = _closest_palette_indices(colors[placement], palette)
+    voxels: list[Voxel] = []
+    for cell, entry_index, points_count, view_count, distance, cell_confidence, color, cell_normal in zip(
+            cells[placement].tolist(), palette_index.tolist(), counts[placement].tolist(),
+            views[placement].tolist(), nearest[placement].tolist(), confidence[placement].tolist(),
+            colors[placement].tolist(), normal[placement].tolist(), strict=True):
+        entry = entries[entry_index]
+        voxel = Voxel(cell[0] + translation[0], cell[1] + translation[1], cell[2] + translation[2],
+                      tuple(cell), entry.id, entry.block_state, points_count, view_count,
+                      distance, cell_confidence, tuple(color), tuple(cell_normal))
+        # The final exporter guard is intentionally repeated after all cleanup/placement.
+        if (voxel.supporting_points < config.minimum_supporting_points
+                or voxel.nearest_observed_point_distance > allowed_distance
+                or voxel.source_cell in free):
+            raise AssertionError("no-completion assertion failed")
+        voxels.append(voxel)
+    return VoxelizationResult(voxel_size, tuple(voxels), frozenset(free), tuple(lower), tuple(upper),
+                              translation, len(points), len(grid.selected), rejected)
+
+
 def result_to_dict(result: VoxelizationResult, palette: Palette) -> dict[str, object]:
     return {
         "schemaVersion": 1,
@@ -405,6 +627,8 @@ def main() -> None:
     parser.add_argument("--minimum-confidence", type=float, default=0.0)
     parser.add_argument("--splat-radius", type=float, default=0.0,
                         help="optional radius in voxels, constrained to 0..0.5")
+    parser.add_argument("--implementation", choices=IMPLEMENTATIONS, default="vectorized",
+                        help="vectorized (default) or the original per-cell loop; both give identical output")
     args = parser.parse_args()
     result = voxelize_points(read_ply(args.source), transform=args.transform,
                              crop_min=args.crop_min, crop_max=args.crop_max,
@@ -413,7 +637,8 @@ def main() -> None:
                              config=VoxelizationConfig(args.minimum_points, args.minimum_views,
                                                        args.minimum_confidence,
                                                        math.sqrt(3) / 2 + 1e-9,
-                                                       args.splat_radius))
+                                                       args.splat_radius),
+                             implementation=args.implementation)
     palette = load_palette(args.palette)
     if args.output.name.endswith(".pb.zst"):
         from voxel_contract import write as write_voxel_contract

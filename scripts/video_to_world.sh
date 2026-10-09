@@ -5,8 +5,8 @@
 #
 # Options are passed to scripts/video_to_world.py; see --help. The image comes
 # from `docker compose -f infra/compose.yaml build pipeline-worker` (override
-# with VTM_PIPELINE_IMAGE). The Paper JAR is taken from VTM_PAPER_JAR_PATH or
-# infra/paper/.
+# with VTM_PIPELINE_IMAGE). The Paper JAR, needed only for --world-writer paper,
+# is taken from VTM_PAPER_JAR_PATH or infra/paper/.
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,7 +31,13 @@ if [[ ! -f "${VIDEO}" ]]; then
   printf 'Video does not exist: %s\n' "${VIDEO}" >&2
   exit 2
 fi
-if [[ ! -f "${PAPER_JAR}" ]]; then
+# --mount with CSV quoting copes with spaces, colons and commas in host paths.
+bind() { printf 'type=bind,"source=%s",target=%s%s' "${1//\"/\"\"}" "$2" "${3:+,readonly}"; }
+
+PAPER_MOUNT=()
+if [[ -f "${PAPER_JAR}" ]]; then
+  PAPER_MOUNT=(--mount "$(bind "${PAPER_JAR}" "/opt/paper/${PAPER_JAR_NAME}" ro)")
+elif [[ " $* " == *" --world-writer paper "* || " $* " == *" --world-writer=paper "* ]]; then
   printf 'Paper JAR not found: %s\nDownload %s from https://papermc.io/downloads/paper\nand put it there, or set VTM_PAPER_JAR_PATH.\n' \
     "${PAPER_JAR}" "${PAPER_JAR_NAME}" >&2
   exit 2
@@ -59,9 +65,6 @@ if [[ "${VTM_DOCKER_GPU_MODE:-toolkit}" == "devices" ]]; then
   )
 fi
 
-# --mount with CSV quoting copes with spaces, colons and commas in host paths.
-bind() { printf 'type=bind,"source=%s",target=%s%s' "${1//\"/\"\"}" "$2" "${3:+,readonly}"; }
-
 # --init forwards Ctrl+C to the pipeline.
 exec docker run --rm --init "${GPU_ARGS[@]}" \
   --user "$(id -u):$(id -g)" \
@@ -69,7 +72,7 @@ exec docker run --rm --init "${GPU_ARGS[@]}" \
   --mount "$(bind "${ROOT_DIR}" /workspace ro)" \
   --mount "$(bind "${VIDEO}" "${INPUT}" ro)" \
   --mount "$(bind "${OUTPUT}" /output)" \
-  --mount "$(bind "${PAPER_JAR}" "/opt/paper/${PAPER_JAR_NAME}" ro)" \
+  "${PAPER_MOUNT[@]}" \
   --mount "$(bind "${CACHE_DIR}" /cache/paper)" \
   --workdir /workspace \
   "${IMAGE}" \

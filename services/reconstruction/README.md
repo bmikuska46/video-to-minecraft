@@ -53,7 +53,12 @@ longer captures match every frame with its 20 neighbours and with frames 2, 4,
 exhaustive matching grows with the square of the frame count: 13-17 s instead of
 162 s on the 250-frame reference room, with the same frames registered. The
 mapper runs global bundle adjustment after every 40% (not 10%) growth of the
-model, which took 55-61 s instead of 89 s there.
+model, which took 55-61 s instead of 89 s there. COLMAP's global mapper (GLOMAP)
+was measured too: with one bundle adjustment round it mapped the room in 50-58 s
+instead of 67-77 s for the incremental mapper plus SPARSE_EXTENSION, but with
+fewer points and some misplaced frames fast mode aligned depth in only 181-189
+instead of 220-227 frames, and on the 60-frame barn it was slower (82-93 s vs
+50 s), so the incremental mapper stays (details in `reconstruct_fixture.py`).
 
 Plain painted walls and ceilings give COLMAP's default SIFT almost nothing to
 match, so frames facing them fail to register. On the reference bedroom (62 s,
@@ -74,6 +79,20 @@ COLMAP stereo fusion: scene completion rebuilds every surface from the depth
 maps, so `fused.ply` is instead every 8th non-edge pixel of each depth map
 back-projected with its normal and color (about as many points), which supplies
 the bounds, floor and wall directions filtering and completion need.
+
+The network alone keeps the RTX 4060 busy: 56.5-57.2 ms per 392 x 700 frame at
+batch sizes 1 to 12, unchanged with CUDA graphs or cuDNN autotuning
+(`torch.compile` needs a C compiler, which the image does not have). Frames
+therefore go through it 4 at a time (1.8 GiB peak), preprocessed on the GPU by
+the same `DPTImageProcessor`, with one upsample and one copy back per batch;
+that saves the ~5 ms per frame around the network (room stage 18.5 s -> 17.9 s,
+held-out error 0.01994 -> 0.01983 and coverage 0.892 -> 0.888 on the same
+workspace; `--batch-size 1` is the per-frame path). Starting Python, PyTorch
+and the model takes another 3.7 s, so `reconstruct_fixture.py` starts the
+depth process before UNDISTORTION and lets it begin (`--wait-for-start`) when
+the frames are ready: the stage then took 14.5 s instead of 17.9-18.5 s on the
+room and 6.8-7.0 s instead of 8.5-8.6 s on the barn, whose undistortion is
+shorter than the model load. `--no-depth-preload` keeps the old order.
 
 Scene scans end with `SCENE_COMPLETION` (`scene_completion.py`), which turns the
 fused cloud into a closed room without gaps:
@@ -215,6 +234,17 @@ color and normals, maps color to the versioned geometry-safe block palette,
 then rests and centers the model for world generation. Optional splatting is
 bounded to half a voxel and disabled by default; no connectivity or completion
 operation exists.
+
+Points are grouped by cell with one stable sort, and every cell's support,
+nearest-point distance, median color and normal are computed in bulk. Pipeline
+clouds carry no per-point weights, so the weighted median is the element at rank
+(k - 1) / 2 of a cell's k points, exactly. Palette scores are computed once per
+distinct color, and colors whose two best scores lie within 1e-9 are re-scored
+with the per-color function. On the reference room (1.65M points, 53-54k blocks
+at 100 blocks) this takes 0.6 s instead of 11.5-11.9 s, and 0.5 s instead of
+5.5 s at 64 blocks, with byte-identical `voxels.pb.zst` on every benchmark run.
+`--implementation loop` runs the original per-cell code, which camera rays and
+splatting still use.
 
 ```bash
 python3 services/reconstruction/voxelizer.py canonical.ply voxels.json \

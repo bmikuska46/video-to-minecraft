@@ -131,11 +131,13 @@ def test_complete_worker_flow_produces_downloadable_world() -> None:
         )
         write_executable(
             worldgen_stub,
-            """
+            f"""
+            import json
             from pathlib import Path
             import sys
             import zipfile
 
+            Path({str(root / "worldgen-argv.json")!r}).write_text(json.dumps(sys.argv[1:]))
             output = Path(sys.argv[sys.argv.index("--output-zip") + 1])
             output.parent.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(output, "w") as archive:
@@ -239,6 +241,12 @@ def test_complete_worker_flow_produces_downloadable_world() -> None:
             world_zip = objects._path(export.world_zip_key)
             with zipfile.ZipFile(world_zip) as archive:
                 assert archive.namelist() == ["level.dat"]
+            # The default writer needs no Paper server, JAR or plugin.
+            worldgen_argv = json.loads((root / "worldgen-argv.json").read_text())
+            assert worldgen_argv[:3] == ["generate", "--writer", "direct"]
+            assert "--paper-jar" not in worldgen_argv
+            world_metric = next(metric for metric in export_metrics if metric.stage == "GENERATING_WORLD")
+            assert world_metric.metrics["writer"] == "direct"
 
         # Both terminal jobs are idempotent and do not duplicate artifacts.
         pipeline.process_scan("integration")

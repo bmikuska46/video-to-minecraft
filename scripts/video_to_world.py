@@ -3,9 +3,10 @@
 
 This runs the same stages as the app, without the API, database or storage:
 reconstruction (COLMAP + depth) -> optional orientation and crop -> voxelization
-into palette blocks -> Paper world generation and validation -> world.zip.
+into palette blocks -> world generation and validation -> world.zip.
 
-It needs COLMAP, CUDA, FFmpeg, Java and the reconstruction Python environment, so
+It needs COLMAP, CUDA, FFmpeg and the reconstruction Python environment (and
+Java plus the Paper JAR for --world-writer paper), so
 it is normally started through scripts/video_to_world.sh, which runs it inside
 the pipeline-worker image. Everything lands in OUTPUT_DIR:
 
@@ -211,7 +212,8 @@ def voxelize(args: argparse.Namespace, output: Path, selection: dict) -> tuple[P
          str(output / "reconstruction" / "canonical.ply"), str(voxels),
          "--crop-min", *map(str, selection["cropMin"]), "--crop-max", *map(str, selection["cropMax"]),
          "--axis", selection["axis"], "--blocks", str(selection["blocks"]),
-         "--transform", *map(str, selection["transform"]), "--palette", str(args.palette)],
+         "--transform", *map(str, selection["transform"]), "--palette", str(args.palette),
+         "--implementation", args.voxelizer],
         output / "logs" / "voxelizer.log")
     from voxel_contract import decode
     world = decode(voxels.read_bytes())
@@ -222,7 +224,10 @@ def voxelize(args: argparse.Namespace, output: Path, selection: dict) -> tuple[P
 
 
 def generate_world(args: argparse.Namespace, output: Path, voxels: Path, occupied: int) -> tuple[Path, dict]:
-    step("Generating the Minecraft world with Paper (generate, then validate every block)")
+    if args.world_writer == "paper":
+        step("Generating the Minecraft world with Paper (generate, then validate every block)")
+    else:
+        step("Writing the Minecraft world (then reading back and checking every block)")
     if occupied > args.max_blocks:
         raise SystemExit(f"error: {occupied:,} blocks exceed --max-blocks {args.max_blocks:,}")
     # The runner only accepts HMAC-signed job manifests. This process is both the
@@ -245,14 +250,15 @@ def generate_world(args: argparse.Namespace, output: Path, voxels: Path, occupie
         manifest.write_text(json.dumps(
             {"payload": payload, "signature": sign_payload(payload, key.encode())}, indent=2) + "\n")
         progress = work / "progress.json"
-        command = [sys.executable, str(args.worldgen_runner), "generate",
-                   "--paper-jar", str(args.paper_jar), "--plugin-jar", str(args.plugin_jar),
-                   "--template", str(args.worldgen_template), "--manifest", str(manifest),
+        command = [sys.executable, str(args.worldgen_runner), "generate", "--writer", args.world_writer,
+                   "--manifest", str(manifest),
                    "--voxels", str(voxels), "--work-root", str(work / "jobs"), "--progress", str(progress),
-                   "--output-zip", str(world_zip), "--display-name", args.world_name,
-                   "--xmx", args.xmx]
-        if args.paper_cache_dir:
-            command += ["--paper-cache-dir", str(args.paper_cache_dir)]
+                   "--output-zip", str(world_zip), "--display-name", args.world_name]
+        if args.world_writer == "paper":
+            command += ["--paper-jar", str(args.paper_jar), "--plugin-jar", str(args.plugin_jar),
+                        "--template", str(args.worldgen_template), "--xmx", args.xmx]
+            if args.paper_cache_dir:
+                command += ["--paper-cache-dir", str(args.paper_cache_dir)]
         run(command, output / "logs" / "worldgen.log", environment=environment, echo=args.verbose)
         result = json.loads(progress.read_text()) if progress.is_file() else {}
     return world_zip, result
@@ -290,8 +296,13 @@ def parse_args() -> argparse.Namespace:
                         help="refuse exports whose crop could hold more blocks (default 1,000,000)")
     export.add_argument("--world-name", help="name in Minecraft's world list (default: the video's file name)")
     export.add_argument("--palette", type=Path, default=ROOT / "packages" / "block-palette" / "palette-v1.json")
+    export.add_argument("--voxelizer", choices=("vectorized", "loop"), default="vectorized",
+                        help="voxelizer implementation; loop is the original, slower one (identical output)")
 
     worldgen = parser.add_argument_group("world generation")
+    worldgen.add_argument("--world-writer", choices=("direct", "paper"), default="direct",
+                          help="direct: write the region files without a server (default); "
+                               "paper: generate and validate with two Paper server runs")
     worldgen.add_argument("--paper-jar", type=Path, default=default_paper_jar(),
                           help=f"Paper server JAR (default: $VTM_PAPER_JAR_PATH or infra/paper/{PAPER_JAR_NAME})")
     worldgen.add_argument("--plugin-jar", type=Path, default=default_plugin_jar(),
@@ -313,15 +324,17 @@ def parse_args() -> argparse.Namespace:
         parser.error("--blocks must be between 1 and 2048")
     if (args.crop_min is None) != (args.crop_max is None):
         parser.error("--crop-min and --crop-max must be given together")
-    if args.paper_jar is None or not args.paper_jar.is_file():
-        parser.error(f"Paper JAR not found; download {PAPER_JAR_NAME} from papermc.io and pass --paper-jar")
-    if args.plugin_jar is None or not args.plugin_jar.is_file():
-        parser.error("worldgen plugin JAR not found; build it with: mvn -pl services/worldgen -am package")
+    if args.world_writer == "paper":
+        if args.paper_jar is None or not args.paper_jar.is_file():
+            parser.error(f"Paper JAR not found; download {PAPER_JAR_NAME} from papermc.io and pass --paper-jar")
+        if args.plugin_jar is None or not args.plugin_jar.is_file():
+            parser.error("worldgen plugin JAR not found; build it with: mvn -pl services/worldgen -am package")
     # The repository copy wins over the one baked into the image, which can be older.
     args.worldgen_runner = ROOT / "services" / "worldgen" / "worldgen_runner.py"
     args.worldgen_template = ROOT / "services" / "worldgen" / "server-template"
     args.world_name = args.world_name or args.video.stem
-    missing = [name for name in ("ffmpeg", "ffprobe", "colmap", "java") if not shutil.which(name)]
+    required = ("ffmpeg", "ffprobe", "colmap", *(("java",) if args.world_writer == "paper" else ()))
+    missing = [name for name in required if not shutil.which(name)]
     if missing:
         parser.error(f"required executables not found: {', '.join(missing)} "
                      "(run scripts/video_to_world.sh to use the pipeline-worker image)")
@@ -335,15 +348,24 @@ def main() -> None:
     manifest = reconstruct(args, args.output)
     step("Choosing the export region")
     selection = export_selection(args, manifest)
+    voxelize_started = time.monotonic()
     voxels, occupied, distribution = voxelize(args, args.output, selection)
+    worldgen_started = time.monotonic()
     world_zip, worldgen = generate_world(args, args.output, voxels, occupied)
+    worldgen_finished = time.monotonic()
     summary = {
         "video": os.environ.get("VTM_SOURCE_VIDEO", str(args.video)), "scanType": args.scan_type, "mode": args.mode,
         "reconstructionSettingsHash": manifest.get("settingsHash"), **selection,
         "occupiedBlocks": occupied, "blockDistribution": dict(distribution.most_common()),
         "worldName": args.world_name, "worldZip": str(world_zip), "worldZipBytes": world_zip.stat().st_size,
+        "worldWriter": args.world_writer, "voxelizer": args.voxelizer,
         "paperGenerationDurationMs": worldgen.get("paperGenerationDurationMs"),
         "paperValidationDurationMs": worldgen.get("paperValidationDurationMs"),
+        "worldWriteDurationMs": worldgen.get("worldWriteDurationMs"),
+        "worldValidationDurationMs": worldgen.get("worldValidationDurationMs"),
+        # Wall time of each export step, including process start-up and file I/O.
+        "voxelizerDurationMs": round((worldgen_started - voxelize_started) * 1000),
+        "worldGenerationDurationMs": round((worldgen_finished - worldgen_started) * 1000),
     }
     (args.output / "export.json").write_text(json.dumps(summary, indent=2) + "\n")
     step(f"Done in {time.monotonic() - started:.0f} s")

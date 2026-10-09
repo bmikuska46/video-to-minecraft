@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Isolated, fail-closed Paper lifecycle for a single Minecraft world export."""
+"""Isolated, fail-closed world generation for a single Minecraft world export.
+
+``--writer paper`` runs the Paper plugin twice (generate, then validate) and
+converts the save to the vanilla singleplayer layout. ``--writer direct`` writes
+the same save with ``world_writer.py`` and validates it by reading the region
+files back, without starting a server.
+"""
 
 from __future__ import annotations
 
@@ -274,6 +280,50 @@ def zip_world(world: Path, destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def generate_direct(args: argparse.Namespace, payload: dict[str, Any], voxel_path: Path,
+                    progress_path: Path) -> None:
+    """Write the save with world_writer.py, validate every block, and zip it."""
+    import world_writer
+
+    job_dir = Path(tempfile.mkdtemp(prefix=f"worldgen-{payload['jobId']}-", dir=args.work_root))
+    try:
+        world = job_dir / payload["worldName"]
+        atomic_status(progress_path, status="RUNNING", phase="GENERATING_WORLD")
+        started = time.monotonic()
+        written = world_writer.write_world(world, voxel_path, payload,
+                                           args.display_name or payload["worldName"])
+        write_duration_ms = round((time.monotonic() - started) * 1000)
+        atomic_status(progress_path, status="RUNNING", phase="VALIDATING_WORLD")
+        started = time.monotonic()
+        checked = world_writer.validate_world(world, written)
+        validation_duration_ms = round((time.monotonic() - started) * 1000)
+        atomic_status(progress_path, status="RUNNING", phase="PACKAGING_WORLD")
+        zip_world(world, args.output_zip.resolve())
+        atomic_status(
+            progress_path,
+            status="SUCCEEDED",
+            phase="READY",
+            output=str(args.output_zip.resolve()),
+            byteSize=args.output_zip.resolve().stat().st_size,
+            writer="direct",
+            worldWriteDurationMs=write_duration_ms,
+            worldValidationDurationMs=validation_duration_ms,
+            checkedBlocks=checked["checkedBlocks"],
+            chunks=checked["chunks"],
+        )
+    except world_writer.WorldWriteError as error:
+        atomic_status(progress_path, status="FAILED", phase="WORLD_GENERATION", error=str(error))
+        raise WorldgenError(str(error)) from error
+    except Exception as error:
+        atomic_status(progress_path, status="FAILED", phase="WORLD_GENERATION", error=str(error))
+        raise
+    finally:
+        if args.keep_work_dir:
+            print(job_dir)
+        else:
+            shutil.rmtree(job_dir)
+
+
 def generate(args: argparse.Namespace) -> None:
     key_value = os.environ.get(args.hmac_key_env)
     if key_value is None:
@@ -281,6 +331,19 @@ def generate(args: argparse.Namespace) -> None:
     key = key_value.encode("utf-8")
     manifest_path = args.manifest.resolve(strict=True)
     voxel_path = args.voxels.resolve(strict=True)
+    if args.writer == "direct":
+        envelope = verify_manifest(manifest_path, key)
+        if voxel_path.stat().st_size > MAX_COMPRESSED_VOXEL_BYTES:
+            raise WorldgenError("compressed voxel artifact exceeds the runner limit")
+        if sha256_file(voxel_path) != envelope["payload"]["voxelSha256"]:
+            raise WorldgenError("voxel artifact checksum does not match the signed manifest")
+        args.work_root.mkdir(parents=True, exist_ok=True)
+        progress_path = args.progress.resolve()
+        atomic_status(progress_path, status="RUNNING", phase="PREPARING")
+        generate_direct(args, envelope["payload"], voxel_path, progress_path)
+        return
+    if args.paper_jar is None or args.plugin_jar is None or args.template is None:
+        raise WorldgenError("--writer paper needs --paper-jar, --plugin-jar and --template")
     paper_jar = args.paper_jar.resolve(strict=True)
     plugin_jar = args.plugin_jar.resolve(strict=True)
     template = args.template.resolve(strict=True)
@@ -362,6 +425,7 @@ def generate(args: argparse.Namespace) -> None:
             phase="READY",
             output=str(args.output_zip.resolve()),
             byteSize=args.output_zip.resolve().stat().st_size,
+            writer="paper",
             paperGenerationDurationMs=generation_duration_ms,
             paperValidationDurationMs=validation_duration_ms,
         )
@@ -394,11 +458,14 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     subparsers = root.add_subparsers(dest="command", required=True)
     run = subparsers.add_parser("generate")
-    run.add_argument("--paper-jar", type=Path, required=True)
+    run.add_argument("--writer", choices=("paper", "direct"), default="paper",
+                     help="paper: generate and validate with two Paper server runs (default); "
+                          "direct: write the region files with world_writer.py")
+    run.add_argument("--paper-jar", type=Path, help="required with --writer paper")
     run.add_argument("--paper-cache-dir", type=Path,
                      help="persistent Paperclip repository (patched server and libraries) shared by jobs")
-    run.add_argument("--plugin-jar", type=Path, required=True)
-    run.add_argument("--template", type=Path, required=True)
+    run.add_argument("--plugin-jar", type=Path, help="required with --writer paper")
+    run.add_argument("--template", type=Path, help="server template; required with --writer paper")
     run.add_argument("--manifest", type=Path, required=True)
     run.add_argument("--voxels", type=Path, required=True)
     run.add_argument("--output-zip", type=Path, required=True)

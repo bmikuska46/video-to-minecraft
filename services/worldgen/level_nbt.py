@@ -113,13 +113,16 @@ def loads(payload: bytes) -> tuple[str, Tag]:
     return name, root
 
 
-def dumps(name: str, root: Tag) -> bytes:
-    """Serialize as gzip-compressed NBT, the encoding used by level.dat and data/*.dat."""
+def dumps(name: str, root: Tag, *, compress: bool = True) -> bytes:
+    """Serialize as gzip-compressed NBT, the encoding used by level.dat and data/*.dat.
+
+    ``compress=False`` returns the raw NBT that region files store per chunk.
+    """
     target = io.BytesIO()
     target.write(bytes([COMPOUND]))
     _write_string(target, name)
     _write_payload(target, root)
-    return gzip.compress(target.getvalue(), mtime=0)
+    return gzip.compress(target.getvalue(), mtime=0) if compress else target.getvalue()
 
 
 def load(path: Path) -> tuple[str, Tag]:

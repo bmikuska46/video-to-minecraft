@@ -5,6 +5,7 @@ import json
 import math
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -442,6 +443,27 @@ class KeyframeTests(unittest.TestCase):
     def test_showinfo_timestamp_parser_preserves_fractional_times(self):
         log = "n: 0 pts: 0 pts_time:0\nn: 1 pts: 1 pts_time:0.125 duration:1\n"
         self.assertEqual(MODULE.parse_showinfo_timestamps(log), [0.0, 0.125])
+
+
+class PreloadedStageTests(unittest.TestCase):
+    CHILD = ("import sys; print('loaded', flush=True); "
+             "line = sys.stdin.readline().strip(); print('got', line); sys.exit(0 if line == 'start' else 3)")
+
+    def test_preloaded_stage_waits_for_start_and_logs_its_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "logs" / "monocular-depth.log"
+            process = MODULE.start_preloaded([sys.executable, "-c", self.CHILD], log)
+            self.assertIsNone(process.poll())  # still waiting for "start"
+            MODULE.finish_preloaded(process, log)
+            self.assertEqual(log.read_text().split(), ["loaded", "got", "start"])
+
+    def test_preloaded_stage_failure_is_reported_like_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "child.log"
+            process = MODULE.start_preloaded([sys.executable, "-c", "import sys; sys.exit(4)"], log)
+            process.wait()
+            with self.assertRaisesRegex(RuntimeError, r"command failed \(4\)"):
+                MODULE.finish_preloaded(process, log)
 
 
 class ManifestTests(unittest.TestCase):
