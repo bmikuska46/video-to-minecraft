@@ -15,7 +15,8 @@ Minecraft Java Edition (26.2) like any other singleplayer world.
 ```
 
 It runs on your own Linux machine with an NVIDIA GPU. A one-minute room video
-takes about 2.5 minutes to process on an RTX 4060.
+takes about 2.5 minutes to process on an RTX 4060 (143 s in the latest
+benchmark, `artifacts/bench/RESULTS.md`).
 
 This is a working proof of concept, not a hosted service.
 
@@ -78,10 +79,12 @@ block grid.
    is matched to the closest-looking vanilla block from a curated palette of 38
    plain, full-cube blocks (concrete, wool, terracotta, planks, stone, bricks and
    so on).
-8. **Write the world.** A [Paper](https://papermc.io/) Minecraft server runs
-   headless, creates an empty flat world, places every block on a stone platform,
-   and then reopens the world to check that every block is there. The result is
-   saved as a normal singleplayer world (creative mode, cheats on) and zipped.
+8. **Write the world.** The blocks and a stone platform under them are written
+   straight into Minecraft's region files, which are then read back to check
+   that every block is there. The result is a normal singleplayer world
+   (creative mode, cheats on), zipped. A [Paper](https://papermc.io/) Minecraft
+   server can do the same job instead (`--world-writer paper`), which takes
+   about 13 seconds longer.
 
 Every step reports its status and timing, so the app shows live progress, and a
 failed scan says which step failed and why.
@@ -111,9 +114,13 @@ failed scan says which step failed and why.
 - **Voxelization.** A cell is kept only if it passes observation-support,
   confidence and known-free checks. Colors are matched in CIE Lab. The output is
   a versioned, deterministic Protobuf + Zstandard file (`voxels.pb.zst`).
-- **World generation.** A one-shot Paper 26.2 plugin places the blocks, a second
-  server start verifies them, and the save is converted to a vanilla
-  singleplayer world.
+- **World generation.** `world_writer.py` writes the Anvil region files of the
+  chunks that hold blocks in the layout Paper 26.2 saves (the game generates the
+  empty chunks around them and computes the light), copies the level files from
+  a captured template, and validates every block by reading the regions back.
+  With `--world-writer paper`, a one-shot Paper 26.2 plugin places the blocks, a
+  second server start verifies them, and the save is converted to a vanilla
+  singleplayer world; both give the same blocks at every position.
 
 The [reconstruction README](services/reconstruction/README.md) explains every
 parameter choice with measurements.
@@ -143,9 +150,10 @@ These are the same tips the app shows before you record:
   The images target RTX 40 series cards (CUDA compute capability 8.9) by default;
   see [Building for another GPU](#building-for-another-gpu).
 - Docker with Compose v2.
-- The **Paper 26.2 server JAR** (`paper-26.2-build.112-stable.jar`) from
-  [papermc.io](https://papermc.io/downloads/paper). It is free, but it is not
-  included in this repository.
+- Optionally, the **Paper 26.2 server JAR** (`paper-26.2-build.112-stable.jar`)
+  from [papermc.io](https://papermc.io/downloads/paper), for the Paper world
+  writer (`--world-writer paper` or `VTM_WORLDGEN_WRITER=paper`). It is free, but
+  it is not included in this repository.
 - **Minecraft Java Edition 26.2** to play the result.
 - For the phone app only: Node.js, pnpm, and the Android SDK for a development
   build. The app was developed against Android; iOS is configured but untested.
@@ -155,7 +163,8 @@ weights, so expect it to take a while. Later runs reuse the image.
 
 ## Quick start: command line
 
-1. Put the Paper JAR where the tools expect it (or set `VTM_PAPER_JAR_PATH`):
+1. Optional, only for `--world-writer paper`: put the Paper JAR where the tools
+   expect it (or set `VTM_PAPER_JAR_PATH`):
 
    ```bash
    mkdir -p infra/paper
@@ -186,7 +195,8 @@ used and the block count), `logs/`, and `reconstruction/`.
 **Re-exporting is fast.** The slow part is the reconstruction, and it is reused
 when you run the command again into the same folder with the same video,
 `--mode` and `--scan-type`. Trying another size, rotation or crop then takes
-about half a minute. The command prints the reconstruction bounds after
+about two seconds (1.4-1.8 s for the benchmark object and room). The command
+prints the reconstruction bounds after
 rotation. Heights and crop boxes are given in those coordinates, which are not
 metres, so pick `--top` or a crop box from the printed numbers:
 
@@ -206,6 +216,8 @@ scripts/video_to_world.sh my-room.mp4 artifacts/cli/my-room --scan-type scene --
 | `--max-blocks N` | `1000000` | Refuse crops that could hold more blocks than this |
 | `--world-name NAME` | video file name | Name shown in Minecraft's world list |
 | `--force-reconstruct` | off | Reconstruct again even if a matching reconstruction exists |
+| `--world-writer direct\|paper` | `direct` | `paper` builds the world with two Paper server runs instead (needs the Paper JAR and Java) |
+| `--voxelizer vectorized\|loop` | `vectorized` | `loop` is the original, slower voxelizer; the output is identical |
 
 Run `scripts/video_to_world.sh --help` for the rest. If Docker has several
 contexts, use one whose engine has the NVIDIA runtime, for example
@@ -215,7 +227,9 @@ reconstruction Python packages installed, you can call
 
 ## Quick start: phone app
 
-1. Put the Paper JAR in `infra/paper/` as in step 1 above.
+1. Put the Paper JAR in `infra/paper/` as in step 1 above. The workers only
+   run it with `VTM_WORLDGEN_WRITER=paper`, but the Compose file mounts that
+   path.
 
 2. Install the mobile dependencies, and build the development client onto a
    phone connected over USB or onto an emulator:
@@ -282,7 +296,7 @@ flowchart LR
     A --> P[("PostgreSQL")]
     A -->|"Celery tasks"| R[("Redis")]
     R --> G["pipeline-worker (CUDA)<br/>COLMAP, Depth Anything V2"]
-    R --> E["export-worker<br/>voxelizer + Paper"]
+    R --> E["export-worker<br/>voxelizer + world writer"]
     G <--> S
     E <--> S
 ```
@@ -297,7 +311,7 @@ export run on separate Celery queues, so an export never waits behind a GPU job.
 | `apps/mobile/` | Expo / React Native app: capture, upload, status, 3D preview, crop and scale controls |
 | `services/api/` | FastAPI control plane: scan lifecycle, signed URLs, Celery tasks, export preflight, health and metrics |
 | `services/reconstruction/` | Reconstruction pipeline (`reconstruct_fixture.py`), depth completion, scene completion, filtering, GLB preview, voxelizer |
-| `services/worldgen/` | Java Paper plugin plus a Python runner that signs job manifests, generates, validates and packages the world |
+| `services/worldgen/` | Python world writer and a Java Paper plugin (opt-in), plus a runner that verifies job manifests, generates, validates and packages the world |
 | `packages/contracts/` | Capture JSON schema and the `voxel_world.proto` Python-to-Java handoff (plus a Java reader) |
 | `packages/block-palette/` | Curated sRGB colors for the block palette |
 | `fixtures/` | Deterministic synthetic capture and point-cloud fixtures, and a real CC BY 4.0 capture |
@@ -359,7 +373,9 @@ Configuration uses environment variables with the `VTM_` prefix. See
 `services/api/app/config.py`. The most useful ones are:
 
 - `VTM_S3_PUBLIC_ENDPOINT_URL`: storage address that the phone can reach.
-- `VTM_PAPER_JAR_PATH`: location of the Paper server JAR.
+- `VTM_WORLDGEN_WRITER`: `direct` (default) writes the world files directly;
+  `paper` uses the Paper server.
+- `VTM_PAPER_JAR_PATH`: location of the Paper server JAR (for the Paper writer).
 - `VTM_WORLDGEN_MANIFEST_KEY`: HMAC key that signs world-generation jobs.
 - `VTM_BLOCK_COUNT_WARNING_THRESHOLD` and `VTM_BLOCK_COUNT_HARD_LIMIT`: export
   size limits (defaults 1,000,000 and 5,000,000 blocks; 5,000,000 is the most the
@@ -381,11 +397,13 @@ mvn -q test
 
 The Python environment needs the `test` extras of `services/api` and
 `services/reconstruction`. The real-capture GPU reconstruction is opt-in through
-`RUN_REAL_CAPTURE_ACCEPTANCE=1`.
+`RUN_REAL_CAPTURE_ACCEPTANCE=1`, and running Paper next to the direct world
+writer on the same voxels through `RUN_PAPER_EQUIVALENCE=1` (see the
+[world generation README](services/worldgen/README.md)).
 
 `services/api/tests/test_pipeline_flow.py` covers the whole worker path, from a
-queued scan to a downloadable world ZIP. It uses stand-in reconstruction and Paper
-executables, so it runs without a GPU or a server JAR.
+queued scan to a downloadable world ZIP. It uses stand-in reconstruction and
+world-generation executables, so it runs without a GPU or a server JAR.
 
 ## Building for another GPU
 
@@ -422,7 +440,7 @@ For the Compose stack, change the `CUDA_ARCHITECTURES` build argument in
 - [Depth Anything V2 Large](https://huggingface.co/depth-anything/Depth-Anything-V2-Large-hf)
   weights are downloaded at image build time. They are licensed **CC BY-NC 4.0**,
   which allows non-commercial use only.
-- [Paper](https://papermc.io/) is used for world generation. It is not
+- [Paper](https://papermc.io/) is used for the optional Paper world writer. It is not
   redistributed here.
 - The `barn-gable-arc-real` fixture is cut from the
   [Tanks and Temples](https://www.tanksandtemples.org/) "Barn" video (CC BY 4.0;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -43,6 +44,9 @@ class Settings(BaseSettings):
     voxelizer_script: str = "/workspace/services/reconstruction/voxelizer.py"
     palette_path: str = "/workspace/packages/block-palette/palette-v1.json"
     worldgen_runner: str = "/opt/worldgen/worldgen_runner.py"
+    # "direct" writes the region files without a server; "paper" runs the Paper
+    # plugin twice (generate, validate) and needs the Paper and plugin JARs.
+    worldgen_writer: Literal["direct", "paper"] = "direct"
     worldgen_paper_jar: str = "/opt/paper/paper-26.2-build.112-stable.jar"
     # On the persistent pipeline volume, so Paper is downloaded and patched once.
     worldgen_paper_cache_dir: str = "/work/pipeline/paper-cache"

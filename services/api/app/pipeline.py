@@ -374,20 +374,26 @@ class Pipeline:
                 environment["VTM_WORLDGEN_MANIFEST_KEY"] = self.settings.worldgen_manifest_key
                 progress_path = work / "worldgen-progress.json"
                 with recorder.stage("GENERATING_WORLD") as stage_metrics:
+                    writer = self.settings.worldgen_writer
+                    paper_arguments = [
+                        "--paper-jar", self.settings.worldgen_paper_jar,
+                        "--paper-cache-dir", self.settings.worldgen_paper_cache_dir,
+                        "--plugin-jar", self.settings.worldgen_plugin_jar,
+                        "--template", self.settings.worldgen_template,
+                    ] if writer == "paper" else []
                     run(
-                        [sys.executable, self.settings.worldgen_runner, "generate",
-                         "--paper-jar", self.settings.worldgen_paper_jar,
-                         "--paper-cache-dir", self.settings.worldgen_paper_cache_dir,
-                         "--plugin-jar", self.settings.worldgen_plugin_jar,
-                         "--template", self.settings.worldgen_template,
+                        [sys.executable, self.settings.worldgen_runner, "generate", "--writer", writer,
+                         *paper_arguments,
                          "--manifest", str(manifest_path), "--voxels", str(voxels),
                          "--work-root", str(work / "worldgen"), "--progress", str(progress_path),
                          "--output-zip", str(world_zip)],
                         work / "worldgen-worker.log", environment=environment,
                     )
+                    stage_metrics["writer"] = writer
                     if progress_path.is_file():
                         progress = json.loads(progress_path.read_text())
-                        for key in ("paperGenerationDurationMs", "paperValidationDurationMs"):
+                        for key in ("paperGenerationDurationMs", "paperValidationDurationMs",
+                                    "worldWriteDurationMs", "worldValidationDurationMs"):
                             if key in progress:
                                 stage_metrics[key] = progress[key]
                     stage_metrics["artifactBytes"] = world_zip.stat().st_size

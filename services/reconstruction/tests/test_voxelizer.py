@@ -205,5 +205,76 @@ class VoxelizerTests(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text())["occupiedBlocks"], 1)
 
 
+class ImplementationEquivalenceTests(unittest.TestCase):
+    """The vectorized voxelizer must reproduce the original loop exactly, field for field."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.palette = MODULE.load_palette(PALETTE_PATH)
+
+    def assert_same(self, cloud, **kwargs):
+        loop = MODULE.voxelize_points(cloud, implementation="loop", palette=self.palette, **kwargs)
+        vectorized = MODULE.voxelize_points(cloud, implementation="vectorized", palette=self.palette, **kwargs)
+        self.assertEqual(loop, vectorized)
+        from voxel_contract import encode
+        self.assertEqual(encode(loop, self.palette), encode(vectorized, self.palette))
+        return vectorized
+
+    def random_cloud(self, seed: int, count: int, *, unit_weights: bool, quantized: bool) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        xyz = rng.uniform(-1.0, 1.0, (count, 3))
+        if quantized:
+            # Many points exactly on voxel planes and many equal colors: ties everywhere.
+            xyz = np.round(xyz * 8) / 8
+        colors = rng.integers(0, 256, (count, 3))
+        if quantized:
+            colors = colors // 64 * 64
+        normals = rng.normal(size=(count, 3))
+        confidence = np.ones(count) if unit_weights else rng.uniform(0.2, 1.0, count)
+        return points([(*xyz[i], *normals[i], *colors[i], confidence[i], int(rng.integers(0, 5)))
+                       for i in range(count)])
+
+    def test_random_clouds_match_with_unit_and_varying_weights(self):
+        for seed, unit_weights, quantized in ((1, True, False), (2, True, True), (3, False, False),
+                                              (4, False, True)):
+            cloud = self.random_cloud(seed, 4000, unit_weights=unit_weights, quantized=quantized)
+            for blocks, axis in ((7, "x"), (16, "y"), (31, "z")):
+                with self.subTest(seed=seed, blocks=blocks):
+                    self.assert_same(cloud, crop_min=[-1, -1, -1], crop_max=[1, 1, 1],
+                                     scale_axis=axis, blocks=blocks)
+
+    def test_thresholds_known_free_cells_and_isolated_removal_match(self):
+        cloud = self.random_cloud(5, 3000, unit_weights=True, quantized=False)
+        free = [(0, 0, 0), (3, 4, 5), (-1, 2, 2), (40, 40, 40)]
+        config = MODULE.VoxelizationConfig(minimum_supporting_points=2, minimum_distinct_views=2,
+                                           isolated_cell_minimum_points=4)
+        result = self.assert_same(cloud, crop_min=[-1, -1, -1], crop_max=[1, 1, 1], scale_axis="x",
+                                  blocks=12, config=config, known_free_cells=free)
+        self.assertGreater(result.rejected_cells, 0)
+        self.assertFalse({voxel.source_cell for voxel in result.voxels} & set(free))
+
+    def test_transform_and_support_counts_match(self):
+        base = self.random_cloud(6, 2000, unit_weights=True, quantized=False)
+        dtype = np.dtype([(name, base.dtype[name]) for name in base.dtype.names if name != "source_view_id"]
+                         + [("support_count", "<u2")])
+        cloud = np.empty(len(base), dtype)
+        for name in base.dtype.names:
+            if name != "source_view_id":
+                cloud[name] = base[name]
+        cloud["support_count"] = np.random.default_rng(7).integers(1, 9, len(base))
+        quarter_turn = [0.0, 0.0, 1.0, 0.5, 0.0, 1.0, 0.0, -0.25, -1.0, 0.0, 0.0, 2.0, 0, 0, 0, 1]
+        self.assert_same(cloud, transform=quarter_turn, crop_min=[-0.5, -1.25, 1.0],
+                         crop_max=[1.5, 0.75, 3.0], scale_axis="z", blocks=10,
+                         config=MODULE.VoxelizationConfig(minimum_distinct_views=3))
+
+    def test_golden_fixtures_match(self):
+        for cloud_path in sorted(FIXTURES.glob("*/cloud.ply")):
+            cloud = __import__("point_cloud").read_ply(cloud_path)
+            lower = [float(cloud[axis].min()) - 0.05 for axis in "xyz"]
+            upper = [float(cloud[axis].max()) + 0.05 for axis in "xyz"]
+            with self.subTest(fixture=cloud_path.parent.name):
+                self.assert_same(cloud, crop_min=lower, crop_max=upper, scale_axis="x", blocks=40)
+
+
 if __name__ == "__main__":
     unittest.main()

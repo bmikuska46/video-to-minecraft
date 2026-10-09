@@ -83,7 +83,13 @@ SEQUENTIAL_OVERLAP = 20
 # with the same 240 frames and ~39,080 points, mean reprojection error 0.879 vs
 # 0.875 px. (Mapper.ba_global_ignore_redundant_points3D was faster still, but on
 # one of two runs of the same video it kept only 14k of the 39k points, starving
-# fast mode's depth alignment of SfM anchors.)
+# fast mode's depth alignment of SfM anchors.) COLMAP's global mapper (GLOMAP)
+# with one bundle adjustment round took 50-58 s instead of the incremental
+# mapper's 54 s plus 13-23 s of SPARSE_EXTENSION, but its models had 32k points
+# and pose outliers (235-239 usable frames instead of 240-249), so depth aligned
+# in only 181-189 of the frames instead of 220-227; with its default three
+# rounds it took 78 s. On the 60-frame barn orbit it took 82-93 s against 50 s.
+# Its per-point error field is in normalized image units (~0.0008 for 0.74 px).
 MAPPER_SPEED_OPTIONS = (
     "--Mapper.ba_global_frames_ratio", "1.4",
     "--Mapper.ba_global_points_ratio", "1.4",
@@ -206,6 +212,29 @@ def run(arguments: list[str], log_path: Path, *, capture: bool = False) -> subpr
     if not capture and result.stdout:
         print(result.stdout, end="")
     return result
+
+
+def start_preloaded(arguments: list[str], log_path: Path) -> subprocess.Popen[str]:
+    """Start a stage that loads its model now and waits for "start" on stdin (``--wait-for-start``)."""
+    print(f"+ {' '.join(arguments)}", flush=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w") as log:
+        return subprocess.Popen(arguments, text=True, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
+
+
+def finish_preloaded(process: subprocess.Popen[str], log_path: Path) -> None:
+    """Let a preloaded stage run, wait for it, and fail like run() does."""
+    started = time.monotonic()
+    try:
+        process.stdin.write("start\n")
+        process.stdin.close()
+    except BrokenPipeError:
+        pass  # It exited early; its return code and log say why.
+    returncode = process.wait()
+    elapsed = time.monotonic() - started
+    if returncode:
+        raise RuntimeError(f"command failed ({returncode}) after {elapsed:.1f}s; see {log_path}")
+    print(log_path.read_text(), end="")
 
 
 def checksum(path: Path) -> str:
@@ -722,6 +751,7 @@ def reconstruct(
     depth_completion: bool = True,
     mode: str = "detailed",
     scan_type: str = "object",
+    preload_depth: bool = True,
 ) -> None:
     if mode not in PROCESSING_MODES:
         raise ValueError(f"unknown processing mode {mode!r}; expected one of {', '.join(PROCESSING_MODES)}")
@@ -764,6 +794,7 @@ def reconstruct(
                     "patchMatchNumIterations", "patchMatchSourceImages"):
             settings.pop(key)
     manifest = StageManifest(output / "manifest.json", settings)
+    preloaded: subprocess.Popen[str] | None = None
     try:
         manifest.start("VALIDATION")
         metadata = inspect_source(video, output, scan_type=scan_type)
@@ -1023,10 +1054,20 @@ def reconstruct(
             ))
         if not backprojected_cloud:
             dense_stages.append(("FUSION", fusion(output / "fused.ply")))
+        if mode == "fast" and preload_depth:
+            # Python, PyTorch and Depth Anything take ~3.7 s to load, which can
+            # happen while COLMAP undistorts the frames (2.7 s on the barn, 10 s on
+            # the room) instead of after it.
+            depth_command = next(command for name, command in dense_stages if name == "MONOCULAR_DEPTH")
+            preloaded = start_preloaded([*depth_command, "--wait-for-start"], output / "logs" / "monocular-depth.log")
         for name, command in dense_stages:
             manifest.start(name)
             log_name = name.lower().replace("_", "-") + ".log"
-            run(command, output / "logs" / log_name)
+            if name == "MONOCULAR_DEPTH" and preloaded is not None:
+                finish_preloaded(preloaded, output / "logs" / log_name)
+                preloaded = None
+            else:
+                run(command, output / "logs" / log_name)
             stage_metrics = None
             artifacts = [f"logs/{log_name}"]
             if name == "UNDISTORTION" and mode == "detailed":
@@ -1112,6 +1153,9 @@ def reconstruct(
         )
         print(f"reconstruction complete: {output / 'canonical.ply'}")
     except Exception as error:
+        if preloaded is not None and preloaded.poll() is None:
+            preloaded.kill()
+            preloaded.wait()
         manifest.fail(error)
         raise
 
@@ -1139,6 +1183,10 @@ def main() -> None:
         help="object: orbit of one thing (60 s, 240 frames); scene: room or several objects (300 s, 600 frames)",
     )
     parser.add_argument(
+        "--no-depth-preload", action="store_true",
+        help="fast mode: load the depth network after undistortion instead of during it",
+    )
+    parser.add_argument(
         "--no-depth-completion", action="store_true",
         help="fuse observed multi-view stereo depth only; skip monocular hole filling",
     )
@@ -1155,7 +1203,7 @@ def main() -> None:
     try:
         reconstruct(video, output, args.colmap, not args.cpu, args.frame_rate, args.up_vector,
                     depth_completion=not args.no_depth_completion, mode=args.mode,
-                    scan_type=args.scan_type)
+                    scan_type=args.scan_type, preload_depth=not args.no_depth_preload)
     except (RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         raise SystemExit(1) from error

@@ -75,6 +75,8 @@ RUN /opt/venv/bin/pip install --no-cache-dir /build/api /build/reconstruction &&
 ENV HF_HUB_OFFLINE=1
 COPY services/worldgen/worldgen_runner.py /opt/worldgen/worldgen_runner.py
 COPY services/worldgen/level_nbt.py /opt/worldgen/level_nbt.py
+COPY services/worldgen/world_writer.py /opt/worldgen/world_writer.py
+COPY services/worldgen/world-template /opt/worldgen/world-template
 COPY services/worldgen/server-template /opt/worldgen/server-template
 COPY --from=worldgen-build /src/services/worldgen/target/worldgen-plugin-0.1.0.jar /opt/worldgen/worldgen-plugin.jar
 LABEL org.opencontainers.image.source="https://github.com/colmap/colmap" \

@@ -55,8 +55,15 @@ MIN_SPARSE_ANCHORS = 100
 # held-out error against the reference room's SfM points moved from 1.88 to 1.91%.
 MODEL_INPUT_SIZE = 518
 FAST_MODEL_INPUT_SIZE = 392
+# The Large model saturates an RTX 4060 with a single 392 x 700 frame: 56.5-57.2
+# ms per frame at batch sizes 1 to 12, and unchanged with CUDA graphs or cuDNN
+# autotuning (torch.compile needs a C compiler, which the image does not have).
+# Batches of 4 (1.8 GiB peak at fp16) only save the per-frame overhead around the
+# network: one preprocessing call on the GPU, one upsample and one copy back.
+PREDICT_BATCH_SIZE = 4
 
 Predictor = Callable[[Image.Image, int, int], np.ndarray]
+BatchPredictor = Callable[[list[Image.Image], int, int], list[np.ndarray]]
 
 
 def read_colmap_array(path: Path) -> np.ndarray:
@@ -394,6 +401,7 @@ def write_cloud(path: Path, points: np.ndarray) -> None:
 
 def predict_workspace_from_sparse(
     dense: Path, predict: Predictor, max_image_size: int, *, cloud: Path | None = None,
+    predict_batch: BatchPredictor | None = None, batch_size: int = PREDICT_BATCH_SIZE,
 ) -> dict[str, Any]:
     """Write a geometric depth map for every frame without running PatchMatch.
 
@@ -401,6 +409,8 @@ def predict_workspace_from_sparse(
     it, fusion is skipped: the frames' depth maps are back-projected into that
     PLY instead. Room scans need it only for bounds, wall and floor directions,
     while scene_completion.py rebuilds the surfaces from the depth maps.
+    ``predict_batch`` (from load_predictors) runs ``batch_size`` frames per
+    network call; without it every frame goes through ``predict`` alone.
     """
     stereo = dense / "stereo"
     folders = ("depth_maps",) if cloud else ("depth_maps", "normal_maps")
@@ -427,22 +437,47 @@ def predict_workspace_from_sparse(
         points = backproject_frame(depth, image, images[name], intrinsics[name]) if report["completed"] else None
         return report, points
 
-    # The network is the bottleneck; loading the next frame and aligning, writing
-    # and back-projecting the previous one run on worker threads meanwhile.
+    # The network is the bottleneck; loading the next frames and aligning, writing
+    # and back-projecting the previous ones run on worker threads meanwhile. With
+    # predict_batch, frames go through the network batch_size at a time.
     from concurrent.futures import ThreadPoolExecutor
 
     names = sorted(images)
+    batch_size = max(1, batch_size) if predict_batch is not None else 1
+    ahead = batch_size + 1
     results = []
     with ThreadPoolExecutor(2) as loader, ThreadPoolExecutor(2) as finisher:
-        loading = [loader.submit(load, name) for name in names[:2]]
+        loading = [loader.submit(load, name) for name in names[:ahead]]
+        pending: list[tuple[str, Image.Image, np.ndarray]] = []
+
+        def flush() -> None:
+            runnable = [index for index, (_, _, anchors) in enumerate(pending)
+                        if (anchors > 0).sum() >= MIN_SPARSE_ANCHORS]
+            disparities: list[np.ndarray | None] = [None] * len(pending)
+            if runnable:
+                height, width = pending[runnable[0]][2].shape
+                if predict_batch is not None:
+                    batch = predict_batch([pending[index][1] for index in runnable], width, height)
+                else:
+                    batch = [predict(pending[index][1], width, height) for index in runnable]
+                for index, disparity in zip(runnable, batch, strict=True):
+                    disparities[index] = disparity
+            for (name, image, anchors), disparity in zip(pending, disparities, strict=True):
+                results.append(finisher.submit(finish, name, image, anchors, disparity))
+            pending.clear()
+
         for index, name in enumerate(names):
             image, anchors = loading[index].result()
-            if index + 2 < len(names):
-                loading.append(loader.submit(load, names[index + 2]))
-            height, width = anchors.shape
-            disparity = predict(image, width, height) if (anchors > 0).sum() >= MIN_SPARSE_ANCHORS else None
-            results.append(finisher.submit(finish, name, image, anchors, disparity))
+            if index + ahead < len(names):
+                loading.append(loader.submit(load, names[index + ahead]))
             loading[index] = None
+            # A batch holds frames of one map size (all frames share one camera).
+            if pending and pending[0][2].shape != anchors.shape:
+                flush()
+            pending.append((name, image, anchors))
+            if len(pending) == batch_size:
+                flush()
+        flush()
         finished = [result.result() for result in results]
     frames = [report for report, _ in finished]
     clouds = [points for _, points in finished if points is not None]
@@ -511,6 +546,19 @@ def load_predictor(input_size: int = MODEL_INPUT_SIZE) -> tuple[Predictor, dict[
 
     ``input_size`` is the network's shorter input side (a multiple of 14).
     """
+    predict, _, metadata = load_predictors(input_size)
+    return predict, metadata
+
+
+def load_predictors(input_size: int = MODEL_INPUT_SIZE) -> tuple[Predictor, BatchPredictor, dict[str, Any]]:
+    """One model behind two predictors: per frame, preprocessed on the CPU, and per batch,
+    preprocessed on the model's device.
+
+    Both run the same DPTImageProcessor (bicubic resize with antialiasing to
+    multiples of 14 keeping the aspect ratio, ImageNet mean and standard
+    deviation); on the GPU its uint8 resize rounds a few pixels differently, by
+    up to 0.09 after normalization (5 grey levels) on the reference room.
+    """
     import torch
     from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
@@ -532,7 +580,16 @@ def load_predictor(input_size: int = MODEL_INPUT_SIZE) -> tuple[Predictor, dict[
             )
         return disparity[0, 0].cpu().numpy()
 
-    return predict, {
+    def predict_batch(images: list[Image.Image], width: int, height: int) -> list[np.ndarray]:
+        with torch.inference_mode():
+            pixels = processor(images=images, return_tensors="pt", device=device)["pixel_values"].to(dtype)
+            disparity = model(pixel_values=pixels).predicted_depth.float()[:, None]
+            disparity = torch.nn.functional.interpolate(
+                disparity, size=(height, width), mode="bicubic", align_corners=False
+            )
+        return list(disparity[:, 0].cpu().numpy())
+
+    return predict, predict_batch, {
         "model": MODEL_REPOSITORY,
         "modelRevision": MODEL_REVISION,
         "modelInputSize": input_size,
@@ -554,14 +611,33 @@ def main() -> None:
                              f"{FAST_MODEL_INPUT_SIZE} with --sparse-anchors)")
     parser.add_argument("--cloud", type=Path,
                         help="with --sparse-anchors: write back-projected points here instead of normal maps")
+    parser.add_argument("--batch-size", type=int, default=PREDICT_BATCH_SIZE,
+                        help=f"with --sparse-anchors: frames per network call, preprocessed on the GPU "
+                             f"(default {PREDICT_BATCH_SIZE}); 1 runs each frame alone with CPU preprocessing")
+    parser.add_argument("--wait-for-start", action="store_true",
+                        help="load the model, print 'ready', then wait for a 'start' line on stdin before reading "
+                             "the workspace (reconstruct_fixture.py loads the model while COLMAP undistorts)")
     args = parser.parse_args()
     if args.cloud and not args.sparse_anchors:
         parser.error("--cloud requires --sparse-anchors")
     started = time.monotonic()
     input_size = args.model_input_size or (FAST_MODEL_INPUT_SIZE if args.sparse_anchors else MODEL_INPUT_SIZE)
-    predict, model_metadata = load_predictor(input_size)
+    predict, predict_batch, model_metadata = load_predictors(input_size)
+    model_metadata["modelLoadSeconds"] = round(time.monotonic() - started, 1)
+    if args.wait_for_start:
+        print("ready", flush=True)
+        if sys.stdin.readline().strip() != "start":
+            raise RuntimeError("cancelled before the dense workspace was ready")
+        # durationSeconds then covers the stage's own work, not the overlapped loading.
+        model_metadata["modelPreloaded"] = True
+        started = time.monotonic()
     if args.sparse_anchors:
-        result = predict_workspace_from_sparse(args.dense, predict, args.max_image_size, cloud=args.cloud)
+        batched = args.batch_size > 1
+        model_metadata["batchSize"] = args.batch_size if batched else 1
+        model_metadata["preprocessing"] = model_metadata["device"] if batched else "cpu"
+        result = predict_workspace_from_sparse(args.dense, predict, args.max_image_size, cloud=args.cloud,
+                                               predict_batch=predict_batch if batched else None,
+                                               batch_size=args.batch_size)
     else:
         result = complete_workspace(args.dense, predict)
     metrics = {**model_metadata, **result}

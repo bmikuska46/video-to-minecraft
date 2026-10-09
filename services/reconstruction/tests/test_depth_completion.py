@@ -163,6 +163,64 @@ class CompletionTests(unittest.TestCase):
         np.testing.assert_allclose(normals[5:15, 5:25], np.broadcast_to([0.0, 0.0, -1.0], (10, 20, 3)), atol=1e-6)
 
 
+def write_workspace(root: Path, frames: int = 7, sparse_frame: int = 5) -> np.ndarray:
+    """A COLMAP dense workspace whose cameras all see tilted_plane(); one frame has too few SfM points."""
+    truth = tilted_plane()
+    (root / "images").mkdir(parents=True)
+    (root / "sparse").mkdir()
+    _, fx, fy, cx, cy = INTRINSICS
+    (root / "sparse" / "cameras.bin").write_bytes(
+        struct.pack("<Q", 1) + struct.pack("<iiQQ", 1, 1, WIDTH, HEIGHT) + struct.pack("<4d", fx, fy, cx, cy))
+    rng = np.random.default_rng(5)
+    points, images = [], []
+    for frame in range(1, frames + 1):
+        name = f"frame-{frame:04d}.jpg"
+        Image.new("RGB", (WIDTH, HEIGHT), (frame * 20, 40, 60)).save(root / "images" / name)
+        count = 10 if frame == sparse_frame else 400
+        u, v = rng.integers(0, WIDTH, count), rng.integers(0, HEIGHT, count)
+        keypoints = b""
+        for column, row in zip(u, v):
+            z = float(truth[row, column])
+            points.append((len(points) + 1, ((column - cx) / fx * z, (row - cy) / fy * z, z)))
+            keypoints += struct.pack("<ddq", column + 0.25, row + 0.25, len(points))
+        images.append(struct.pack("<i7di", frame, 1, 0, 0, 0, 0, 0, 0, 1) + name.encode() + b"\0"
+                      + struct.pack("<Q", count) + keypoints)
+    (root / "sparse" / "images.bin").write_bytes(struct.pack("<Q", frames) + b"".join(images))
+    (root / "sparse" / "points3D.bin").write_bytes(struct.pack("<Q", len(points)) + b"".join(
+        struct.pack("<Q3d", point_id, *xyz) + bytes(3) + struct.pack("<d", 0.5) + struct.pack("<Q", 0)
+        for point_id, xyz in points))
+    return truth
+
+
+class BatchedWorkspaceTests(unittest.TestCase):
+    def test_batched_prediction_matches_frame_by_frame_prediction(self):
+        outputs = {}
+        for batch_size in (1, 3, 4):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                truth = write_workspace(root)
+                predict = predictor_for(truth)
+                calls = []
+
+                def predict_batch(images, width, height):
+                    calls.append(len(images))
+                    return [predict(image, width, height) for image in images]
+
+                metrics = MODULE.predict_workspace_from_sparse(
+                    root, predict, 960, cloud=root / "fused.ply",
+                    predict_batch=predict_batch if batch_size > 1 else None, batch_size=batch_size)
+                maps = {path.name: path.read_bytes() for path in sorted((root / "stereo" / "depth_maps").iterdir())}
+                outputs[batch_size] = (metrics, maps, (root / "fused.ply").read_bytes())
+                if batch_size > 1:
+                    # Six frames have enough SfM points; frame 5 is skipped, never sent to the network.
+                    self.assertEqual(sum(calls), 6)
+                    self.assertLessEqual(max(calls), batch_size)
+        self.assertEqual(outputs[1][0]["completedFrames"], 6)
+        self.assertEqual(outputs[1][0]["skippedFrames"], [{"image": "frame-0005.jpg", "reason": "too few SfM points"}])
+        for batch_size in (3, 4):
+            self.assertEqual(outputs[batch_size], outputs[1])
+
+
 class BackprojectedCloudTests(unittest.TestCase):
     def test_plane_is_back_projected_into_world_space_with_its_normal(self):
         depth = np.full((HEIGHT, WIDTH), 2.0, np.float32)
