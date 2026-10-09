@@ -15,8 +15,7 @@ Minecraft Java Edition (26.2) like any other singleplayer world.
 ```
 
 It runs on your own Linux machine with an NVIDIA GPU. A one-minute room video
-takes about 2.5 minutes to process on an RTX 4060 (143 s in the latest
-benchmark, `artifacts/bench/RESULTS.md`).
+takes about 2.5 minutes to process on an RTX 4060.
 
 This is a working proof of concept, not a hosted service.
 

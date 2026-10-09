@@ -23,7 +23,7 @@ of two writers (`worldgen_runner.py generate --writer`):
   plus spawn/world defaults, removes transient server files, and converts the
   save to the vanilla layout (below).
 
-On the benchmark exports (`artifacts/bench/RESULTS.md`) the direct writer wrote
+On the benchmark exports the direct writer wrote
 the reference room at 100 blocks (53-54k blocks, 56 chunks) in 0.22 s and read
 it back in 0.30-0.36 s; the whole world step, runner start and zip included,
 took 0.6-0.7 s, where the two Paper runs took 13.6-14.3 s. It produced the same
